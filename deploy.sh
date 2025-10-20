@@ -266,7 +266,7 @@ deploy_application() {
             docker-compose up -d --build
         else
             docker build -t $REPO_NAME:latest .
-            docker run -d --name $REPO_NAME -p $APP_PORT:$APP_PORT $REPO_NAME:latest
+            docker run -d --name $REPO_NAME -p 8080:80 $REPO_NAME:latest
         fi
         
         sleep 5
@@ -290,7 +290,7 @@ server {
     server_name _;
 
     location / {
-        proxy_pass http://localhost:$APP_PORT;
+        proxy_pass http://localhost:8080;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;

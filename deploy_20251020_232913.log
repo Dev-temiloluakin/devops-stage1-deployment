@@ -1,0 +1,7 @@
+[0;32m[2025-10-20 23:29:13][0m ==========================================
+[0;32m[2025-10-20 23:29:13][0m Starting Automated Deployment Process
+[0;32m[2025-10-20 23:29:13][0m ==========================================
+[0;32m[2025-10-20 23:29:13][0m === Collecting Deployment Parameters ===
+[0;32m[2025-10-20 23:30:13][0m Parameters collected successfully
+[0;32m[2025-10-20 23:30:13][0m === Cloning Repository ===
+[0;34m[INFO][0m Repository already exists. Pulling latest changes...

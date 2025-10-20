@@ -1,0 +1,8 @@
+[0;32m[2025-10-20 23:17:05][0m ==========================================
+[0;32m[2025-10-20 23:17:05][0m Starting Automated Deployment Process
+[0;32m[2025-10-20 23:17:05][0m ==========================================
+[0;32m[2025-10-20 23:17:05][0m === Collecting Deployment Parameters ===
+[0;32m[2025-10-20 23:18:02][0m Parameters collected successfully
+[0;32m[2025-10-20 23:18:02][0m === Cloning Repository ===
+[0;34m[INFO][0m Cloning repository...
+Cloning into 'devops-stage1-deployment'...

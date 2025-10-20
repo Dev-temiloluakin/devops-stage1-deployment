@@ -1,0 +1,10 @@
+[0;32m[2025-10-20 23:12:38][0m ==========================================
+[0;32m[2025-10-20 23:12:38][0m Starting Automated Deployment Process
+[0;32m[2025-10-20 23:12:38][0m ==========================================
+[0;32m[2025-10-20 23:12:38][0m === Collecting Deployment Parameters ===
+[0;32m[2025-10-20 23:14:27][0m Parameters collected successfully
+[0;32m[2025-10-20 23:14:27][0m === Cloning Repository ===
+[0;34m[INFO][0m Cloning repository...
+Cloning into 'devops-stage1-deployment'...
+remote: Repository not found.
+fatal: repository 'https://github.com/temiloluakin/devops-stage1-deployment/' not found
