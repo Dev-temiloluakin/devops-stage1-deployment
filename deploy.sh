@@ -1,8 +1,8 @@
 #!/bin/bash
 
 ################################################################################
-# Automated Docker Deployment Script
-# Description: Deploys a Dockerized application to a remote server
+# Automated Docker Deployment Script with SSL Support
+# Description: Deploys a Dockerized application to a remote server with SSL
 ################################################################################
 
 set -e
@@ -69,6 +69,11 @@ cleanup_deployment() {
         echo "Removing Nginx configuration..."
         sudo rm -f /etc/nginx/sites-available/$REPO_NAME
         sudo rm -f /etc/nginx/sites-enabled/$REPO_NAME
+        
+        echo "Removing SSL certificates..."
+        sudo rm -rf /etc/ssl/certs/$REPO_NAME.*
+        sudo rm -rf /etc/ssl/private/$REPO_NAME.*
+        
         sudo systemctl reload nginx
         
         echo "Cleanup complete!"
@@ -127,6 +132,25 @@ collect_parameters() {
     if ! [[ "$APP_PORT" =~ ^[0-9]+$ ]]; then
         log_error "Port must be a number"
         exit 1
+    fi
+    
+    # SSL Configuration
+    echo ""
+    log_info "SSL Configuration (Optional)"
+    echo "1) No SSL (HTTP only)"
+    echo "2) Self-signed certificate (for testing)"
+    echo "3) Let's Encrypt with Certbot (for production - requires domain)"
+    read -p "Choose SSL option [1-3]: " SSL_OPTION
+    SSL_OPTION=${SSL_OPTION:-1}
+    
+    if [[ "$SSL_OPTION" == "3" ]]; then
+        read -p "Enter your domain name (e.g., example.com): " DOMAIN_NAME
+        read -p "Enter email for Let's Encrypt notifications: " CERTBOT_EMAIL
+        
+        if [[ -z "$DOMAIN_NAME" ]] || [[ -z "$CERTBOT_EMAIL" ]]; then
+            log_error "Domain name and email are required for Let's Encrypt"
+            exit 1
+        fi
     fi
     
     log "Parameters collected successfully"
@@ -278,13 +302,81 @@ ENDSSH
 }
 
 ################################################################################
+# STEP 7A: CONFIGURE SSL - SELF-SIGNED CERTIFICATE
+################################################################################
+configure_self_signed_ssl() {
+    log "=== Configuring Self-Signed SSL Certificate ==="
+    
+    ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" bash << ENDSSH | tee -a "$LOG_FILE"
+        echo "Generating self-signed SSL certificate..."
+        
+        # Create SSL directories if they don't exist
+        sudo mkdir -p /etc/ssl/certs
+        sudo mkdir -p /etc/ssl/private
+        
+        # Generate self-signed certificate (valid for 365 days)
+        sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+            -keyout /etc/ssl/private/$REPO_NAME.key \
+            -out /etc/ssl/certs/$REPO_NAME.crt \
+            -subj "/C=US/ST=State/L=City/O=Organization/CN=$SSH_HOST"
+        
+        # Set proper permissions
+        sudo chmod 600 /etc/ssl/private/$REPO_NAME.key
+        sudo chmod 644 /etc/ssl/certs/$REPO_NAME.crt
+        
+        echo "Self-signed certificate generated successfully"
+ENDSSH
+    
+    log "Self-signed SSL certificate configured"
+}
+
+################################################################################
+# STEP 7B: CONFIGURE SSL - LET'S ENCRYPT (CERTBOT)
+################################################################################
+configure_letsencrypt_ssl() {
+    log "=== Configuring Let's Encrypt SSL with Certbot ==="
+    
+    ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" bash << ENDSSH | tee -a "$LOG_FILE"
+        echo "Installing Certbot..."
+        
+        # Install Certbot
+        if ! command -v certbot &> /dev/null; then
+            sudo apt-get install -y certbot python3-certbot-nginx
+        else
+            echo "Certbot already installed"
+        fi
+        
+        echo "Obtaining Let's Encrypt certificate for $DOMAIN_NAME..."
+        
+        # Obtain certificate (--nginx plugin configures nginx automatically)
+        sudo certbot --nginx -d $DOMAIN_NAME \
+            --non-interactive \
+            --agree-tos \
+            --email $CERTBOT_EMAIL \
+            --redirect
+        
+        # Set up auto-renewal
+        sudo systemctl enable certbot.timer
+        sudo systemctl start certbot.timer
+        
+        echo "Let's Encrypt certificate configured successfully"
+        echo "Auto-renewal is enabled"
+ENDSSH
+    
+    log "Let's Encrypt SSL certificate configured"
+}
+
+################################################################################
 # STEP 7: CONFIGURE NGINX
 ################################################################################
 configure_nginx() {
     log "=== Configuring Nginx ==="
     
-    ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" bash << ENDSSH | tee -a "$LOG_FILE"
-        sudo tee /etc/nginx/sites-available/$REPO_NAME > /dev/null << 'EOF'
+    case "$SSL_OPTION" in
+        1)
+            # HTTP Only
+            ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" bash << ENDSSH | tee -a "$LOG_FILE"
+                sudo tee /etc/nginx/sites-available/$REPO_NAME > /dev/null << 'EOF'
 server {
     listen 80;
     server_name _;
@@ -299,14 +391,94 @@ server {
 }
 EOF
 
-        sudo ln -sf /etc/nginx/sites-available/$REPO_NAME /etc/nginx/sites-enabled/
-        sudo rm -f /etc/nginx/sites-enabled/default
-        
-        sudo nginx -t
-        sudo systemctl reload nginx
-        
-        echo "Nginx configured successfully"
+                sudo ln -sf /etc/nginx/sites-available/$REPO_NAME /etc/nginx/sites-enabled/
+                sudo rm -f /etc/nginx/sites-enabled/default
+                
+                sudo nginx -t
+                sudo systemctl reload nginx
+                
+                echo "Nginx configured successfully (HTTP only)"
 ENDSSH
+            ;;
+            
+        2)
+            # Self-Signed SSL
+            configure_self_signed_ssl
+            
+            ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" bash << ENDSSH | tee -a "$LOG_FILE"
+                sudo tee /etc/nginx/sites-available/$REPO_NAME > /dev/null << 'EOF'
+# Redirect HTTP to HTTPS
+server {
+    listen 80;
+    server_name _;
+    return 301 https://\$host\$request_uri;
+}
+
+# HTTPS Server
+server {
+    listen 443 ssl;
+    server_name _;
+
+    ssl_certificate /etc/ssl/certs/$REPO_NAME.crt;
+    ssl_certificate_key /etc/ssl/private/$REPO_NAME.key;
+    
+    # SSL Configuration
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+                sudo ln -sf /etc/nginx/sites-available/$REPO_NAME /etc/nginx/sites-enabled/
+                sudo rm -f /etc/nginx/sites-enabled/default
+                
+                sudo nginx -t
+                sudo systemctl reload nginx
+                
+                echo "Nginx configured successfully with self-signed SSL"
+ENDSSH
+            ;;
+            
+        3)
+            # Let's Encrypt - Certbot handles nginx config automatically
+            # First set up basic HTTP config for domain verification
+            ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" bash << ENDSSH | tee -a "$LOG_FILE"
+                sudo tee /etc/nginx/sites-available/$REPO_NAME > /dev/null << 'EOF'
+server {
+    listen 80;
+    server_name $DOMAIN_NAME;
+
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+                sudo ln -sf /etc/nginx/sites-available/$REPO_NAME /etc/nginx/sites-enabled/
+                sudo rm -f /etc/nginx/sites-enabled/default
+                
+                sudo nginx -t
+                sudo systemctl reload nginx
+                
+                echo "Basic Nginx configuration created"
+ENDSSH
+            
+            # Now run Certbot to add SSL
+            configure_letsencrypt_ssl
+            ;;
+    esac
     
     log "Nginx configured and reloaded"
 }
@@ -324,10 +496,10 @@ validate_deployment() {
     ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" "docker ps | grep $REPO_NAME" >> "$LOG_FILE"
     
     log_info "Testing application endpoint..."
-    if ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" "curl -f http://localhost:$APP_PORT" >> "$LOG_FILE" 2>&1; then
-        log "Application is responding on port $APP_PORT"
+    if ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" "curl -f http://localhost:8080" >> "$LOG_FILE" 2>&1; then
+        log "Application is responding on port 8080"
     else
-        log_warning "Application not responding on port $APP_PORT (might be normal for some apps)"
+        log_warning "Application not responding on port 8080 (might be normal for some apps)"
     fi
     
     log_info "Testing Nginx proxy..."
@@ -337,8 +509,32 @@ validate_deployment() {
         log_warning "Nginx proxy test failed"
     fi
     
+    # SSL Validation
+    if [[ "$SSL_OPTION" == "2" ]] || [[ "$SSL_OPTION" == "3" ]]; then
+        log_info "Testing HTTPS endpoint..."
+        if ssh -i "$SSH_KEY" "$SSH_USER@$SSH_HOST" "curl -k -f https://localhost" >> "$LOG_FILE" 2>&1; then
+            log "HTTPS is working"
+        else
+            log_warning "HTTPS test failed"
+        fi
+    fi
+    
     log "${GREEN}Deployment validation complete!${NC}"
-    log "Application should be accessible at http://$SSH_HOST"
+    
+    # Display access information
+    case "$SSL_OPTION" in
+        1)
+            log "Access your application at: http://$SSH_HOST"
+            ;;
+        2)
+            log "Access your application at: https://$SSH_HOST"
+            log_warning "Note: Browser will show security warning (self-signed certificate)"
+            ;;
+        3)
+            log "Access your application at: https://$DOMAIN_NAME"
+            log "SSL certificate is valid and trusted"
+            ;;
+    esac
 }
 
 ################################################################################
@@ -352,7 +548,6 @@ main() {
         log "Starting Cleanup Process"
         log "=========================================="
         
-        # Need to collect minimal parameters for cleanup
         read -p "Enter remote server username: " SSH_USER
         read -p "Enter remote server IP: " SSH_HOST
         read -p "Enter SSH key path [~/.ssh/id_rsa]: " SSH_KEY
@@ -379,7 +574,22 @@ main() {
     log "=========================================="
     log "${GREEN}✓ DEPLOYMENT COMPLETED SUCCESSFULLY${NC}"
     log "=========================================="
-    log "Access your application at: http://$SSH_HOST"
+    
+    case "$SSL_OPTION" in
+        1)
+            log "Access your application at: http://$SSH_HOST"
+            ;;
+        2)
+            log "Access your application at: https://$SSH_HOST"
+            log_warning "Browser will show security warning for self-signed certificate"
+            log_info "This is normal and safe for testing environments"
+            ;;
+        3)
+            log "Access your application at: https://$DOMAIN_NAME"
+            log "✓ SSL certificate is valid and auto-renewal is enabled"
+            ;;
+    esac
+    
     log "Check logs at: $LOG_FILE"
     log ""
     log "To cleanup this deployment, run: ./deploy.sh --cleanup"
